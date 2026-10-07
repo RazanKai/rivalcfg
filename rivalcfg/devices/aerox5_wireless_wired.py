@@ -40,6 +40,14 @@ profile = {
             "first_preset": 0,
             "max_preset_count": 5,
             "default": "400, 800, 1200, 2400, 3200",
+            # Reading back the presets and the selected one.  The device answers
+            # the write command with its read bit (0x80) set -- 0x2D | 0x80 --
+            # and echoes the setting in the same layout it was sent in.  This is
+            # what lets the selected preset survive a press of the mouse's own
+            # DPI button: the button moves this very register, so a read reports
+            # the button's doing rather than only what was last written.
+            "get_command": [0xAD],
+            "response_length": 64,
         },
         "polling_rate": {
             "label": "Polling rate",

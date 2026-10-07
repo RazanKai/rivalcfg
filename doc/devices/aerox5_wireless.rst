@@ -51,6 +51,20 @@ You can switch preset using the button under the mouse wheel.
       mouse.sensitivity([800, 1600, 2000, 4000], selected_preset=2)
 
 
+Reading the current preset
+~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The mouse can be asked which preset is currently selected. The answer is the
+device's own state, so it also reflects a press of the DPI button under the
+wheel::
+
+    $ rivalcfg --get-sensitivity
+    Sensitivity presets: preset 3/5 at 1000 DPI (400, 800, 1000, 1800, 2200)
+
+From the Python API, ``mouse.get_sensitivity()`` returns the same information as
+``{"dpis": [400, 800, 1000, 1800, 2200], "selected_preset": 2}``.
+
+
 Colors
 ------
 

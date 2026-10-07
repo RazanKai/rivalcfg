@@ -77,6 +77,33 @@ Example of CLI usage::
     rivalcfg --sensitivity "200, 400, 800, 1600, 8000"
 
 
+Reading the value back
+----------------------
+
+A device that can be asked what its sensitivity currently is declares how to
+ask, and this handler knows how to decode the answer::
+
+    "sensitivity": {
+        # ...
+        "get_command": [0xAD],
+        "response_length": 64,
+    },
+
+``get_command`` is the write command with the read bit (``0x80``) set, and
+``response_length`` is how many bytes the device answers with.  Declaring
+them is all it takes: :class:`rivalcfg.mouse.Mouse` then provides a
+``get_sensitivity()`` method (and raises :class:`AttributeError` on devices that
+do not declare them, rather than inventing a value), while the CLI grows a
+``--get-sensitivity`` option beside ``--sensitivity``::
+
+    $ rivalcfg --get-sensitivity
+    Sensitivity presets: preset 3/5 at 1000 DPI (400, 800, 1000, 1800, 2200)
+
+The answer is the device's own state, so it also reports a preset that was
+selected with the mouse's DPI button rather than by the host -- a change that is
+otherwise invisible to the computer.
+
+
 Functions
 ---------
 """
@@ -159,6 +186,93 @@ def process_value(setting_info, value, selected_preset=None):
     #
 
     return merge_bytes(dpi_count, selected_preset, output_values)
+
+
+def process_response(setting_info, data):
+    """Called by the :class:`rivalcfg.mouse.Mouse` class to decode the device's
+    answer to a *read* of a "multidpi_range_choice" type setting.
+
+    The device echoes the command it was asked for and then the setting in
+    exactly the layout :func:`process_value` sends it, which is what makes the
+    read-back possible at all::
+
+        [0]              the command byte, echoed
+        [1]              the number of configured presets
+        [2]              the selected preset (``first_preset`` included)
+        [3..3+count-1]   one "output_choices" byte per preset
+
+    Anything after the presets is left over from an earlier, longer answer --
+    the device does not clear its buffer -- so the reply is *sliced by the
+    announced count* rather than read to its end.  Doing otherwise is how a
+    five-preset read taken straight after a three-preset one comes back with
+    the two presets that no longer exist.
+
+    :param dict setting_info: The information dict of the setting from the
+                              device profile.
+    :param data: The bytes read back from the device.
+    :rtype: dict
+    :return: ``{"dpis": [...], "selected_preset": int}``, where
+             ``selected_preset`` is zero-based -- the same convention
+             :func:`process_value` takes, with ``first_preset`` already
+             subtracted.
+    """
+    if len(data) < 3:
+        raise ValueError("the device did not return a sensitivity config")
+
+    preset_count = data[1]
+    if preset_count < 1:
+        raise ValueError("the device did not return any sensitivity preset")
+    if len(data) < 3 + preset_count:
+        raise ValueError(
+            "truncated sensitivity config: %i preset(s) announced, %i byte(s) read"
+            % (preset_count, len(data))
+        )
+
+    output_choices = setting_info["output_choices"]
+    by_output_value = {value: dpi for dpi, value in output_choices.items()}
+
+    dpis = []
+    for output_value in data[3 : 3 + preset_count]:
+        if output_value not in by_output_value:
+            raise ValueError(
+                "unknown DPI value 0x%02X in the sensitivity config" % output_value
+            )
+        dpis.append(by_output_value[output_value])
+
+    return {
+        "dpis": dpis,
+        "selected_preset": data[2] - setting_info.get("first_preset", 0),
+    }
+
+
+def format_response(setting_info, value):
+    """Render a :func:`process_response` result for the CLI.
+
+    One line, so it can be read by a human and parsed by a script alike: the
+    selected preset, its DPI, and the whole preset list (which the caller needs
+    to map :attr:`selected_preset` back to a DPI value of its own).
+
+    :param dict setting_info: The information dict of the setting from the
+                              device profile.
+    :param dict value: A :func:`process_response` result.
+    :rtype: str
+    """
+    dpis = value["dpis"]
+    selected = value["selected_preset"]
+
+    if not dpis or not 0 <= selected < len(dpis):
+        raise ValueError(
+            "the device returned an out of range selected preset (%i/%i)"
+            % (selected + 1, len(dpis))
+        )
+
+    return "%s: preset %i/%i at %i DPI (%s)" % (
+        setting_info["label"],
+        selected + 1,
+        len(dpis),
+        dpis[selected],
+        ", ".join(str(dpi) for dpi in dpis),
+    )
 
 
 def add_cli_option(cli_parser, setting_name, setting_info):

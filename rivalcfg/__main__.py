@@ -6,6 +6,7 @@ import argparse
 from . import cli
 from . import udev
 from . import devices
+from . import handlers
 from . import get_first_mouse
 
 _EPILOG = """
@@ -113,6 +114,29 @@ def main(args=sys.argv[1:]):
                 battery_info["is_charging"],
             )
         )
+        return
+
+    # Print readable settings and exit
+    if mouse:
+        requested = [
+            (name, info)
+            for name, info in mouse_profile["settings"].items()
+            if info.get("get_command")
+            and getattr(settings, "GET_%s" % name.upper(), False)
+        ]
+    else:
+        requested = []
+
+    if requested:
+        for setting_name, setting_info in requested:
+            try:
+                value = getattr(mouse, "get_%s" % setting_name)()
+            except (IOError, ValueError) as error:
+                print("E: %s." % error)
+                sys.exit(1)
+            handler = getattr(handlers, setting_info["value_type"])
+            print(handler.format_response(setting_info, value))
+
         return
 
     # Reset

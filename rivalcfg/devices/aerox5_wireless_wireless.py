@@ -11,6 +11,11 @@ def _patch_command(info):
     result["command"] = list(result["command"])
     # Patch the command
     result["command"][0] = result["command"][0] | _WIRELESS_FLAG
+    # Patch the read command too, when there is one: the flag is part of the
+    # link, not of the setting, so a read has to carry it as well.
+    if "get_command" in result:
+        result["get_command"] = list(result["get_command"])
+        result["get_command"][0] = result["get_command"][0] | _WIRELESS_FLAG
     # Add readback
     result["readback_length"] = _READBACK_LENGTH
     return result

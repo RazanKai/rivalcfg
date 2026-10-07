@@ -59,6 +59,8 @@ Changelog
   * fix(color_helpers): Fixed color-gradient validation (@eeshsaxena, #287)
   * misc(test): New E2E tests for devices (@flozz)
   * misc(standalone): Windows standalone build is now using Python 3.14 (@flozz)
+  * feat(api): Settings can now be read back from the device, when a profile declares how to ask for them: ``get_<setting>()`` in the Python API and ``--get-<setting>`` on the CLI (#215)
+  * feat(device): Added read-back of the sensitivity presets and of the selected preset for the Aerox 5 Wireless family, so a preset chosen with the mouse's own DPI button is reported (#215)
 
 * **v4.17.0:**
 

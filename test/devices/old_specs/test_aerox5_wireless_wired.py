@@ -6,6 +6,59 @@ from rivalcfg.devices import aerox5_wireless_wired
 from rivalcfg import mouse_settings
 
 
+class FakeAnsweringDevice(usbhid.FakeDevice):
+    """A fake device that answers the read command with a captured reply."""
+
+    def __init__(self, answer):
+        super().__init__()
+        self.answer = list(answer)
+        self.pending = []
+
+    def write(self, data):
+        super().write(data)
+        self.pending.append(list(self.answer))
+
+    def read(self, max_length, timeout_ms=0):
+        assert timeout_ms != 0, "a zero timeout blocks forever on hidapi 0.15.0"
+        if self.pending:
+            return self.pending.pop(0)
+        return []
+
+
+class TestGetSensitivity(object):
+    # Captured from the device: 5 presets, the third one selected.
+    ANSWER = [0xAD, 0x05, 0x02, 0x04, 0x09, 0x0B, 0x14, 0x19] + [0x00] * 56
+
+    @pytest.fixture
+    def device(self):
+        return FakeAnsweringDevice(self.ANSWER)
+
+    @pytest.fixture
+    def mouse(self, device):
+        return mouse.Mouse(
+            device,
+            aerox5_wireless_wired.profile,
+            mouse_settings.FakeMouseSettings(
+                0x1038,
+                0xBAAD,
+                aerox5_wireless_wired.profile,
+            ),
+        )
+
+    def test_read_command(self, mouse, device):
+        # 0x2D | 0x80: the write command with the read bit set.  No wireless
+        # flag in wired mode.
+        mouse.get_sensitivity()
+        device.bytes.seek(0)
+        assert device.bytes.read() == b"\x02\x00\xad"
+
+    def test_get_sensitivity(self, mouse):
+        assert mouse.get_sensitivity() == {
+            "dpis": [400, 800, 1000, 1800, 2200],
+            "selected_preset": 2,
+        }
+
+
 class TestDevice(object):
     @pytest.fixture
     def mouse(self):

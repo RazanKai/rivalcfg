@@ -130,6 +130,204 @@ class TestGetMouse(object):
         pass  # TODO
 
 
+FAKE_PROFILE_READABLE = {
+    "name": "Fake Readable Mouse",
+    "vendor_id": 0x1038,
+    "product_id": 0xBEEF,
+    "endpoint": 2,
+    "settings": {
+        "sensitivity": {
+            "label": "Sensitivity presets",
+            "description": "Set sensitivity presets (DPI)",
+            "cli": ["-s", "--sensitivity"],
+            "report_type": usbhid.HID_REPORT_TYPE_OUTPUT,
+            "command": [0x2D],
+            "value_type": "multidpi_range_choice",
+            "input_range": [400, 2200, 200],
+            "output_choices": {
+                400: 0x04,
+                800: 0x09,
+                1000: 0x0B,
+                1800: 0x14,
+                2200: 0x19,
+            },
+            "dpi_length_byte": 1,
+            "first_preset": 0,
+            "max_preset_count": 5,
+            "default": "400, 800, 1000, 1800, 2200",
+            "get_command": [0xAD],
+            "response_length": 64,
+        },
+        "sensitivity_no_length": {
+            "label": "Sensitivity presets",
+            "description": "A readable setting missing its response length",
+            "cli": ["--sensitivity-no-length"],
+            "report_type": usbhid.HID_REPORT_TYPE_OUTPUT,
+            "command": [0x2D],
+            "value_type": "multidpi_range_choice",
+            "input_range": [400, 2200, 200],
+            "output_choices": {400: 0x04},
+            "dpi_length_byte": 1,
+            "first_preset": 0,
+            "max_preset_count": 5,
+            "default": "400",
+            "get_command": [0xAD],
+        },
+        "sensitivity_bad_handler": {
+            "label": "Sensitivity presets",
+            "description": "A readable setting whose handler cannot decode",
+            "cli": ["--sensitivity-bad-handler"],
+            "report_type": usbhid.HID_REPORT_TYPE_OUTPUT,
+            "command": [0x2D],
+            "value_type": "choice",
+            "choices": {1: 0x01},
+            "default": 1,
+            "get_command": [0xAD],
+            "response_length": 64,
+        },
+    },
+    "save_command": {
+        "report_type": usbhid.HID_REPORT_TYPE_OUTPUT,
+        "command": [0x5A, 0x0E],
+    },
+}
+
+
+class FakePipeDevice(usbhid.FakeDevice):
+    """A fake device that answers reads the way a HID pipe does.
+
+    A reply is queued when the command that asks for it is *written* -- a real
+    device has nothing to hand back before it is asked -- and each read hands
+    back one pending report and empties the pipe, so a read on a quiet device
+    returns nothing.  :class:`rivalcfg.usbhid.FakeDevice` instead answers every
+    read with as many zero bytes as asked for, which no real device does and
+    which would hide both the draining of stale reports and a missing answer.
+
+    It also refuses ``timeout_ms=0`` on purpose: on hidapi 0.15.0 a zero
+    timeout means "no timeout" and blocks forever, so a read that would hang on
+    a real device fails here instead of quietly passing the suite.
+    """
+
+    #: 5 presets, the third one selected: what the "get" command gets answered.
+    SENSITIVITY_ANSWER = [
+        0xAD,
+        0x05,
+        0x02,
+        0x04,
+        0x09,
+        0x0B,
+        0x14,
+        0x19,
+    ] + [0x00] * 56
+
+    def __init__(self, answers=None, pending=None):
+        super().__init__()
+        #: Replies the device gives, keyed by the command byte it received.
+        self.answers = dict(answers or {})
+        #: Reports already waiting to be read, oldest first.
+        self.pending = [list(report) for report in (pending or [])]
+        #: The ``timeout_ms`` of every read, in order.
+        self.read_timeouts = []
+
+    def write(self, data):
+        super().write(data)
+        command = bytes(data)[1] if len(data) > 1 else None
+        if command in self.answers:
+            self.pending.append(list(self.answers[command]))
+
+    def read(self, max_length, timeout_ms=0):
+        self.read_timeouts.append(timeout_ms)
+        assert timeout_ms != 0, "a zero timeout blocks forever on hidapi 0.15.0"
+        if self.pending:
+            return self.pending.pop(0)
+        return []
+
+
+class TestMouseGetter(object):
+    @pytest.fixture
+    def device(self):
+        return FakePipeDevice(answers={0xAD: FakePipeDevice.SENSITIVITY_ANSWER})
+
+    @pytest.fixture
+    def silent_device(self):
+        return FakePipeDevice()
+
+    @pytest.fixture
+    def mouse(self, device):
+        return mouse.Mouse(
+            device,
+            FAKE_PROFILE_READABLE,
+            mouse_settings.FakeMouseSettings(0x1038, 0xBEEF, FAKE_PROFILE_READABLE),
+        )
+
+    @pytest.fixture
+    def silent_mouse(self, silent_device):
+        return mouse.Mouse(
+            silent_device,
+            FAKE_PROFILE_READABLE,
+            mouse_settings.FakeMouseSettings(0x1038, 0xBEEF, FAKE_PROFILE_READABLE),
+        )
+
+    def test_get_is_available(self, mouse):
+        assert hasattr(mouse, "get_sensitivity")
+
+    def test_unknown_setting(self, mouse):
+        with pytest.raises(AttributeError):
+            mouse.get_nonsense()
+
+    def test_unreadable_setting(self, mouse):
+        with pytest.raises(AttributeError):
+            mouse.get_setting1()
+
+    def test_missing_response_length(self, mouse):
+        with pytest.raises(ValueError):
+            mouse.get_sensitivity_no_length()
+
+    def test_handler_that_cannot_decode(self, mouse):
+        with pytest.raises(ValueError):
+            mouse.get_sensitivity_bad_handler()
+
+    def test_writes_the_get_command(self, mouse, device):
+        mouse.get_sensitivity()
+        device.bytes.seek(0)
+        assert device.bytes.read() == b"\x02\x00\xad"
+
+    def test_decodes_the_answer(self, mouse):
+        assert mouse.get_sensitivity() == {
+            "dpis": [400, 800, 1000, 1800, 2200],
+            "selected_preset": 2,
+        }
+
+    def test_drops_reports_left_over_from_before(self, device):
+        # A reply that was never read -- an interrupted run, or an answer that
+        # arrived after the previous read had given up -- must not be decoded
+        # as the current state.  The stale report says preset 5; the answer to
+        # our own question, and so the result, must say preset 3.
+        device.pending.append([0xAD, 0x05, 0x04, 0x04, 0x09, 0x0B, 0x14, 0x19])
+        readable_mouse = mouse.Mouse(
+            device,
+            FAKE_PROFILE_READABLE,
+            mouse_settings.FakeMouseSettings(0x1038, 0xBEEF, FAKE_PROFILE_READABLE),
+        )
+        assert readable_mouse.get_sensitivity()["selected_preset"] == 2
+        assert device.pending == []
+
+    def test_raises_when_the_device_does_not_answer(self, silent_mouse):
+        with pytest.raises(IOError):
+            silent_mouse.get_sensitivity()
+
+    def test_never_reads_with_a_zero_timeout(self, mouse, device):
+        mouse.get_sensitivity()
+        assert 0 not in device.read_timeouts
+
+    def test_reading_does_not_change_the_stored_settings(self, mouse):
+        # A read reports what the device says; it must not be recorded as if
+        # the library had written it.
+        before = mouse.mouse_settings.get("sensitivity")
+        mouse.get_sensitivity()
+        assert mouse.mouse_settings.get("sensitivity") == before
+
+
 class TestMouse(object):
     @pytest.fixture
     def mouse(self, monkeypatch):

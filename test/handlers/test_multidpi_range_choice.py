@@ -195,6 +195,114 @@ class TestProcessValue(object):
             multidpi_range_choice.process_value(setting_info, [100])
 
 
+class TestProcessResponse(object):
+    @pytest.fixture
+    def setting_info(self):
+        return {
+            "value_type": "multidpi_range_choice",
+            "output_choices": {
+                400: 0x04,
+                800: 0x09,
+                1000: 0x0B,
+                1800: 0x14,
+                2200: 0x19,
+            },
+            "first_preset": 0,
+            "max_preset_count": 5,
+            "dpi_length_byte": 1,
+        }
+
+    def test_reads_back_the_presets_and_the_selected_one(self, setting_info):
+        # The reply carries the command byte, the count, the selected preset
+        # and then one output_choices byte per preset -- the layout
+        # process_value sends, echoed back.
+        assert multidpi_range_choice.process_response(
+            setting_info, [0xAD, 0x05, 0x02, 0x04, 0x09, 0x0B, 0x14, 0x19]
+        ) == {
+            "dpis": [400, 800, 1000, 1800, 2200],
+            "selected_preset": 2,
+        }
+
+    def test_ignores_whatever_follows_the_last_preset(self, setting_info):
+        # The device does not clear its buffer between answers, so a shorter
+        # reply still carries the tail of a longer one.  The announced count
+        # is what says where the data ends; anything past it must not be
+        # decoded as a preset.
+        assert multidpi_range_choice.process_response(
+            setting_info,
+            [0xAD, 0x02, 0x00, 0x04, 0x09, 0x0B, 0x14, 0x19],
+        ) == {
+            "dpis": [400, 800],
+            "selected_preset": 0,
+        }
+
+    def test_first_preset_is_subtracted(self, setting_info):
+        setting_info["first_preset"] = 1
+        assert (
+            multidpi_range_choice.process_response(
+                setting_info, [0xAD, 0x02, 0x01, 0x04, 0x09]
+            )["selected_preset"]
+            == 0
+        )
+
+    def test_no_preset(self, setting_info):
+        with pytest.raises(ValueError):
+            multidpi_range_choice.process_response(
+                setting_info, [0xAD, 0x00, 0x00] + [0x00] * 61
+            )
+
+    def test_truncated_response(self, setting_info):
+        with pytest.raises(ValueError):
+            multidpi_range_choice.process_response(
+                setting_info, [0xAD, 0x05, 0x02, 0x04]
+            )
+
+    def test_too_short_response(self, setting_info):
+        with pytest.raises(ValueError):
+            multidpi_range_choice.process_response(setting_info, [0xAD, 0x05])
+
+    def test_unknown_dpi_byte(self, setting_info):
+        with pytest.raises(ValueError):
+            multidpi_range_choice.process_response(
+                setting_info, [0xAD, 0x01, 0x00, 0xFF]
+            )
+
+
+class TestFormatResponse(object):
+    @pytest.fixture
+    def setting_info(self):
+        return {"label": "Sensitivity presets"}
+
+    def test_format(self, setting_info):
+        assert (
+            multidpi_range_choice.format_response(
+                setting_info,
+                {"dpis": [400, 800, 1000, 1800, 2200], "selected_preset": 2},
+            )
+            == "Sensitivity presets: preset 3/5 at 1000 DPI (400, 800, 1000, 1800, 2200)"
+        )
+
+    def test_single_preset(self, setting_info):
+        assert (
+            multidpi_range_choice.format_response(
+                setting_info, {"dpis": [800], "selected_preset": 0}
+            )
+            == "Sensitivity presets: preset 1/1 at 800 DPI (800)"
+        )
+
+    def test_out_of_range_selected_preset(self, setting_info):
+        with pytest.raises(ValueError):
+            multidpi_range_choice.format_response(
+                setting_info, {"dpis": [400, 800], "selected_preset": 2}
+            )
+
+    def test_no_preset(self, setting_info):
+        with pytest.raises(ValueError):
+            multidpi_range_choice.format_response(
+                setting_info, {"dpis": [], "selected_preset": 0}
+            )
+
+
 class TestAddCliOption(object):
     @pytest.fixture
     def cli(self):

@@ -313,7 +313,101 @@ class Mouse:
         if "RIVALCFG_DEBUG_NO_COMMAND_DELAY" not in os.environ:
             time.sleep(self._command_approve_delay)
 
+    def _make_getter(self, name):
+        """Build the ``get_xxx`` method the profile asked for (or refuse to).
+
+        A setting is readable only when its profile entry describes *how* to ask
+        for it -- a ``get_command`` and the ``response_length`` to read back
+        -- and only when its handler knows how to decode the answer
+        (``process_response``).  Neither is guessable from the write side, which
+        is why "this setting cannot be read" is an error rather than an empty
+        answer: the point of the getter is to report the device's real state, and
+        a silent zero would be indistinguishable from a real one.
+
+        :param str name: The requested attribute (``get_<setting>``).
+        :rtype: callable
+        :return: A function taking no argument, returning the decoded setting.
+        :raise AttributeError: The setting is unknown or not readable.
+        :raise ValueError: The setting's handler cannot decode a read-back.
+        """
+        setting_name = name[4:]
+
+        setting_info = self.mouse_profile["settings"].get(setting_name)
+        if setting_info is None:
+            raise AttributeError("Mouse instance has no attribute '%s'" % name)
+
+        if "get_command" not in setting_info:
+            raise AttributeError(
+                "Mouse instance has no attribute '%s' (the '%s' setting of the %s"
+                " cannot be read back)"
+                % (name, setting_name, self.mouse_profile["name"])
+            )
+
+        if "response_length" not in setting_info:
+            raise ValueError(
+                "Missing 'response_length' parameter for the read-back of the"
+                " '%s' setting of the %s" % (setting_name, self.mouse_profile["name"])
+            )
+
+        handler_name = setting_info.get("value_type")
+        handler = getattr(handlers, handler_name or "", None)
+        if handler is None or not hasattr(handler, "process_response"):
+            raise ValueError(
+                "Unknown handler '%s' for the read-back of the '%s' setting of the %s"
+                % (handler_name, setting_name, self.mouse_profile["name"])
+            )
+
+        suffix = setting_info.get("command_suffix", [])
+        response_length = setting_info["response_length"]
+
+        def _handle_response(response):
+            return handler.process_response(setting_info, response)
+
+        def _read_command():
+            # Drop whatever the device left in the pipe first.  Its buffer is
+            # not cleared between answers -- a five-preset reply read straight
+            # after a three-preset one still carries the two presets that no
+            # longer exist -- so a stale report would otherwise be decoded as
+            # the current state.  Bounded, because a device that answers
+            # faster than we can drain must not spin here forever.
+            #
+            # The timeout is deliberately 1ms and not 0: on hidapi 0.15.0 a
+            # zero timeout means "no timeout" and the read blocks forever, so
+            # a 0 here hangs on an idle device.  1ms is far below the ~10ms a
+            # real answer takes, so this cannot eat the reply we are about to
+            # ask for.
+            for _ in range(8):
+                if not self._hid_device.read(response_length, timeout_ms=1):
+                    break
+
+            self._hid_write(
+                report_type=setting_info["report_type"],
+                data=helpers.merge_bytes(setting_info["get_command"], suffix),
+            )
+
+            # One reply per query: the device answers a read with a single
+            # report and nothing else, so reading exactly one keeps the pipe
+            # balanced.
+            response = self._hid_device.read(response_length, timeout_ms=200)
+
+            if "RIVALCFG_DEBUG_PRINT_HID_REPORT" in os.environ:
+                print("[USBHID]>       | %s" % bytes(response).hex(" ").upper())
+
+            if not response:
+                raise IOError(
+                    "The %s did not answer the '%s' read"
+                    % (self.mouse_profile["name"], setting_name)
+                )
+            return _handle_response(response)
+
+        return _read_command
+
     def __getattr__(self, name):
+        # Handle every get_xxx methods generated from device's profiles
+
+        if name.startswith("get_"):
+            return self._make_getter(name)
+
         # Handle every set_xxx methods generated from device's profiles
 
         if not name.startswith("set_"):

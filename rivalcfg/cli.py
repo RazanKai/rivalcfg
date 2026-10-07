@@ -143,6 +143,18 @@ def add_mouse_cli(cli_parser, mouse_profile):
     for setting_name, setting_info in mouse_profile["settings"].items():
         handler = getattr(handlers, setting_info["value_type"])
         handler.add_cli_option(cli_group, setting_name, setting_info)
+        # A setting whose profile says how to read it back gets a "--get-xxx"
+        # option beside its write one.  It is generated the same way the write
+        # option is, so a device gains the read by declaring it, not by growing
+        # a CLI branch of its own.
+        if "get_command" in setting_info:
+            cli_group.add_argument(
+                "--get-%s" % normalize_cli_option_name(setting_name),
+                help="Print the current %s of the mouse and exit"
+                % setting_info["label"].lower(),
+                dest="GET_%s" % setting_name.upper(),
+                action="store_true",
+            )
 
     cli_group.add_argument(
         "-r",
